@@ -1,0 +1,51 @@
+{
+  "version": 2,
+  "groups": {
+    "models": {
+      "name": "Models",
+      "order": 10
+    },
+    "share": {
+      "name": "Share",
+      "order": 20
+    }
+  },
+  "bundles": {},
+  "assets": {
+    "assets/models/turf-clash-hero-robot-animated.glb": {
+      "path": "/manus-storage/game/sha256/9a99018a8a19d782d122a03e50734d2a530dc47bedec2f6cc71162993753f68f.glb",
+      "sha256": "sha256:9a99018a8a19d782d122a03e50734d2a530dc47bedec2f6cc71162993753f68f",
+      "size": 1188132,
+      "assetType": "model",
+      "groupId": "models"
+    },
+    "assets/models/turf-clash-hero-robot-rigged.glb": {
+      "path": "/manus-storage/game/sha256/273481099c6adbc93fb5bfce176add900a5834e615efd666948a0b65bad5e42e.glb",
+      "sha256": "sha256:273481099c6adbc93fb5bfce176add900a5834e615efd666948a0b65bad5e42e",
+      "size": 890484,
+      "assetType": "model",
+      "groupId": "models"
+    },
+    "assets/models/turf-clash-hero-robot.glb": {
+      "path": "/manus-storage/game/sha256/20423cf0bace7aa3dd9e5f0ad314bd8df8579643104c25779951cbf9d6d9c729.glb",
+      "sha256": "sha256:20423cf0bace7aa3dd9e5f0ad314bd8df8579643104c25779951cbf9d6d9c729",
+      "size": 835352,
+      "assetType": "model",
+      "groupId": "models"
+    },
+    "assets/share/favicon.png": {
+      "path": "/manus-storage/game/sha256/dd30058724c03538bec4b2bac29b3d61478507c22bbc99ec685d5f5e026bb5ee.png",
+      "sha256": "sha256:dd30058724c03538bec4b2bac29b3d61478507c22bbc99ec685d5f5e026bb5ee",
+      "size": 1944,
+      "assetType": "image",
+      "groupId": "share"
+    },
+    "assets/share/og.png": {
+      "path": "/manus-storage/game/sha256/4513206b2b5063a63b90123e841e7a895296819fe9aa93b46c5680df9cbe593c.png",
+      "sha256": "sha256:4513206b2b5063a63b90123e841e7a895296819fe9aa93b46c5680df9cbe593c",
+      "size": 6080139,
+      "assetType": "image",
+      "groupId": "share"
+    }
+  }
+}

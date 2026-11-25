@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 2,
+  "title": "Turf Clash",
+  "description": "A fast, friendly territory-capturing arena game where you claim turf, outsmart bots, and clash for the crown.",
+  "defaultCaptions": {
+    "x": "Turf Clash — claim your corner and rule the arena.",
+    "facebook": "Turf Clash: claim your corner, outsmart the opposition, and own the arena.",
+    "reddit": "Turf Clash — a playful territory-capturing arena game with bots, trails, and knockouts.",
+    "discord": "Turf Clash: claim turf, cut trails, and clash for the crown."
+  },
+  "assets": {
+    "og": "assets/share/og.png",
+    "favicon": "assets/share/favicon.png"
+  }
+}

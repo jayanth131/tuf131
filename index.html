@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#15130e" />
+    <meta name="description" content="A fast, friendly territory-capturing arena game where you claim turf, outsmart bots, and clash for the crown." />
+    <meta property="og:title" content="Turf Clash" />
+    <meta property="og:description" content="Claim your corner and rule the arena." />
+    <meta property="og:image" content="/assets/share/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Turf Clash" />
+    <meta name="twitter:description" content="Claim your corner and rule the arena." />
+    <meta name="twitter:image" content="/assets/share/og.png" />
+    <title>Turf Clash — Claim your corner</title>
+    <link rel="icon" type="image/png" sizes="128x128" href="/assets/share/favicon.png" />
+    <link rel="preload" href="./fonts/ManusCC0-Bold.ttf" as="font" type="font/ttf" crossorigin />
+    <link rel="preload" href="./fonts/ManusCC0-Regular.ttf" as="font" type="font/ttf" crossorigin />
+  </head>
+  <body>
+    <canvas id="game-canvas" aria-label="Turf Clash 3D arena"></canvas>
+    <div id="ui"></div>
+    <div id="match-announcement" class="screen-reader-only" role="status" aria-atomic="true"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

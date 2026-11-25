@@ -1,0 +1,20 @@
+{
+  "name": "ring-out-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node turf_server.mjs",
+    "start:ring-out": "node authoritative_server.mjs",
+    "test:e2e": "node e2e_clients.mjs",
+    "test": "node --test server.test.mjs turf_server.test.mjs"
+  },
+  "dependencies": {
+    "turfclash": "file:..",
+    "ws": "^8.18.3"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.17.1"
+}
