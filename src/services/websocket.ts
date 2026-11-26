@@ -29,6 +29,14 @@ export type RoomMessage =
   | { type: 'match'; matchId: number; boardVersion: number; snapshot: RoomSnapshot; events: RuleEvent[] }
   | { type: 'error'; message: string }
 
+export function roomSocketUrl(configured: string | undefined, pageUrl: string): string {
+  const endpoint = new URL(configured?.trim() || '/turf-ws', pageUrl)
+  if (endpoint.protocol === 'https:') endpoint.protocol = 'wss:'
+  else if (endpoint.protocol === 'http:') endpoint.protocol = 'ws:'
+  if (endpoint.pathname === '/') endpoint.pathname = '/turf-ws'
+  return endpoint.href
+}
+
 export class MultiplayerClient {
   private socket?: WebSocket
   private connectTimer?: number
@@ -43,7 +51,7 @@ export class MultiplayerClient {
   connect(request: RoomRequest): void {
     this.disconnect()
     try {
-      const endpoint = import.meta.env.VITE_WS_URL || new URL('/turf-ws', window.location.href).href
+      const endpoint = roomSocketUrl(import.meta.env.VITE_WS_URL, window.location.href)
       const socket = new WebSocket(endpoint)
       this.socket = socket
       this.connectTimer = window.setTimeout(() => socket.close(), 8000)
