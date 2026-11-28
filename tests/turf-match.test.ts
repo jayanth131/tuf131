@@ -17,6 +17,28 @@ function move(match: TurfMatch, id: string, input: MoveInput) {
 }
 
 describe('shared Turf Clash match rules', () => {
+  it('permanently eliminates a player when their last owned tile is captured', () => {
+    const events: RuleEvent[] = []
+    const match = newMatch(events)
+    const [host, guest] = match.players
+    const cell = (x: number, z: number) => gridIndex(x, z, 40)
+    match.territory.fill(-1)
+    for (let offset = 18; offset <= 22; offset += 1) {
+      for (const index of [cell(offset, 18), cell(offset, 22), cell(18, offset), cell(22, offset)]) match.territory[index] = 0
+    }
+    match.territory[cell(20, 20)] = 1
+    host.trail = [cell(20, 15), cell(20, 16), cell(20, 17)]
+    host.trail.forEach(index => { match.trail[index] = 0 })
+    Object.assign(host, { x: 0, z: -3 })
+    move(match, host.id, { x: 0, z: 1 })
+    expect(guest).toMatchObject({ eliminated: true, alive: false })
+    expect(match.snapshot().players[1].territory).toBe(0)
+    expect(events).toContainEqual({ type: 'eliminated', playerId: guest.id })
+    const position = { x: guest.x, z: guest.z }
+    match.update(3, new Map([[guest.id, { x: 1, z: 0 }]]))
+    expect(guest).toMatchObject({ ...position, eliminated: true, alive: false })
+  })
+
   it('knocks out the trail owner, awards the cutter, and keeps previously captured turf', () => {
     const events: RuleEvent[] = []
     const match = newMatch(events)

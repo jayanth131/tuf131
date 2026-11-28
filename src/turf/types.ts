@@ -26,6 +26,7 @@ export interface PlayerProfile {
   respawns: number
   trail: number[]
   alive: boolean
+  eliminated?: boolean
   respawnAt: number
   bot: boolean
   ready: boolean

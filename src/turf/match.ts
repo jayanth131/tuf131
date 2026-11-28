@@ -5,6 +5,7 @@ export type RuleEvent =
   | { type: 'capture'; message: string; playerId: string }
   | { type: 'knockout'; message: string; playerId: string; by?: string }
   | { type: 'respawn'; message: string; playerId: string }
+  | { type: 'eliminated'; playerId: string }
   | { type: 'countdown'; value: number }
 
 export interface MatchEntrant { id: string; nickname: string; avatar: AvatarConfig; ready: boolean; bot?: boolean }
@@ -59,7 +60,6 @@ export class TurfMatch {
   private readonly baseCenters = new Map<number, { x: number; z: number }>()
   private readonly botTimers = new Map<string, number>()
   private readonly botDirections = new Map<string, MoveInput>()
-  private readonly departed = new Set<string>()
   private readonly onEvent: (event: RuleEvent) => void
 
   constructor(settings: MatchSettings, entrants: MatchEntrant[], onEvent: (event: RuleEvent) => void = () => {}) {
@@ -110,7 +110,7 @@ export class TurfMatch {
       return
     }
     for (const player of this.players) {
-      if (this.departed.has(player.id)) continue
+      if (player.eliminated) continue
       if (player.bot) this.updateBot(player, dt)
       else {
         const input = inputs.get(player.id)
@@ -118,19 +118,11 @@ export class TurfMatch {
       }
     }
     for (const player of this.players) {
-      if (!this.departed.has(player.id)) this.updateRespawn(player)
+      if (!player.eliminated) this.updateRespawn(player)
     }
   }
 
   end(): void { this.phase = 'ended' }
-
-  removePlayer(id: string): void {
-    const player = this.players.find(candidate => candidate.id === id)
-    if (!player || this.phase === 'ended') return
-    this.departed.add(id)
-    this.clearTrail(player)
-    player.alive = false
-  }
 
   snapshot(localId = ''): GameSnapshot {
     return {
@@ -180,10 +172,22 @@ export class TurfMatch {
       this.clearTrail(player)
       const gained = result ? result.captured.length + result.trail.length : 0
       if (gained > 0) {
+        this.eliminatePlayersWithoutTurf()
         this.pushNotification(`${player.nickname} captured ${gained} tiles.`)
         this.onEvent({ type: 'capture', message: `${player.nickname} expanded the turf.`, playerId: player.id })
       }
     }
+  }
+
+  private eliminatePlayersWithoutTurf(): void {
+    const owners = new Set(this.territory)
+    this.players.forEach((player, index) => {
+      if (player.eliminated || owners.has(index)) return
+      player.eliminated = true
+      player.alive = false
+      this.clearTrail(player)
+      this.onEvent({ type: 'eliminated', playerId: player.id })
+    })
   }
 
   private updateBot(player: PlayerProfile, dt: number): void {

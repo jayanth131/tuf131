@@ -20,7 +20,7 @@ function cleanCode(value: string): string { return value.toUpperCase().replace(/
 export class TurfApp {
   private readonly root: HTMLElement
   private readonly engine: TurfEngine
-  private readonly multiplayer = new MultiplayerClient(message => this.receiveRoom(message), () => this.roomDisconnected())
+  private readonly multiplayer = new MultiplayerClient(message => this.receiveRoom(message), code => this.roomDisconnected(code))
   private screen: Screen = 'home'
   private pendingMode: GameMode = 'practice'
   private room?: RoomState
@@ -28,6 +28,12 @@ export class TurfApp {
   private roomMessage = ''
   private connecting = false
   private matchId = 0
+  private reconnectTimer?: number
+  private reconnectAttempts = 0
+  private lastMatchMessageAt = 0
+  private seatToken?: string
+  private watching = false
+  private autoDirection = { x: 0, z: 0 }
   private inputTimer = 0
   private remoteBoardVersion = -1
   private remoteTerritory = new Int8Array()
@@ -63,22 +69,45 @@ export class TurfApp {
     window.addEventListener('keydown', event => {
       if (this.screen !== 'game') return
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement)?.tagName ?? '')) return
+      if (event.code === 'Space' && (this.autoDirection.x || this.autoDirection.z || !(event.target instanceof HTMLButtonElement))) {
+        this.stopMovement()
+        event.preventDefault()
+        return
+      }
       const key = event.key.toLowerCase()
-      if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) { this.held.add(key); event.preventDefault() }
+      if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+        if (!event.repeat && !this.watching) {
+          this.held.add(key)
+          const direction = this.keyboardDirection()
+          if (direction.x || direction.z) this.autoDirection = direction
+        }
+        event.preventDefault()
+      }
     })
     window.addEventListener('keyup', event => this.held.delete(event.key.toLowerCase()))
-    window.addEventListener('blur', () => { this.held.clear(); this.input = { x: 0, z: 0 } })
+    window.addEventListener('blur', () => this.stopMovement())
     this.hudTimer = window.setInterval(() => this.updateHud(), 100)
   }
 
-  update(dt: number): void {
+  private keyboardDirection(): { x: number; z: number } {
     const keyboard = { x: 0, z: 0 }
     if (this.held.has('a') || this.held.has('arrowleft')) keyboard.x -= 1
     if (this.held.has('d') || this.held.has('arrowright')) keyboard.x += 1
     if (this.held.has('w') || this.held.has('arrowup')) keyboard.z -= 1
     if (this.held.has('s') || this.held.has('arrowdown')) keyboard.z += 1
-    const desired = Math.hypot(this.input.x, this.input.z) > 0.05 ? this.input : keyboard
-    if (this.room && this.screen === 'game') {
+    return keyboard
+  }
+
+  update(dt: number): void {
+    const steering = Math.hypot(this.input.x, this.input.z) > 0.05 ? this.input : this.keyboardDirection()
+    if (steering.x || steering.z) this.autoDirection = steering
+    const desired = this.watching ? { x: 0, z: 0 } : appStore.get().autoRun ? this.autoDirection : steering
+    if (this.room && this.screen === 'game' && !this.reconnectAttempts
+      && performance.now() - this.lastMatchMessageAt > 8000) {
+      this.multiplayer.disconnect()
+      this.roomDisconnected()
+    }
+    if (this.room && this.screen === 'game' && !this.watching && !this.reconnectAttempts) {
       this.inputTimer += dt
       if (this.inputTimer >= 0.045) {
         this.inputTimer = 0
@@ -90,6 +119,7 @@ export class TurfApp {
 
   dispose(): void {
     if (this.hudTimer) window.clearInterval(this.hudTimer)
+    window.clearTimeout(this.reconnectTimer)
     this.multiplayer.disconnect()
     this.closeCelebration()
     this.audio?.stopMusic()
@@ -136,6 +166,10 @@ export class TurfApp {
       if (target.dataset.field === 'theme') this.updateMatchSettings({ theme: target.value as 'meadow' | 'desert' | 'ice' | 'neon' | 'candy' })
       if (target.dataset.field === 'music' && target instanceof HTMLInputElement) { this.musicOn = target.checked; appStore.updateSettings({ music: target.checked }); this.syncAudio() }
       if (target.dataset.field === 'sfx' && target instanceof HTMLInputElement) { this.sfxOn = target.checked; appStore.updateSettings({ sfx: target.checked }); this.syncAudio() }
+      if (target.dataset.field === 'auto-run' && target instanceof HTMLInputElement) {
+        appStore.update({ autoRun: target.checked })
+        this.stopMovement()
+      }
     })
   }
 
@@ -186,6 +220,7 @@ export class TurfApp {
       case 'start-room': this.multiplayer.send({ type: 'start' }); break
       case 'leave-room': this.leaveRoom(); this.renderHome(); break
       case 'end-match': this.room ? this.multiplayer.send({ type: 'end' }) : this.engine.endNow(); break
+      case 'stop-moving': this.stopMovement(); break
       case 'show-arena': this.engine.showArena(); break
       case 'follow-player': this.engine.followPlayer(); break
       case 'toggle-scores':
@@ -198,7 +233,15 @@ export class TurfApp {
       case 'toggle-music': this.musicOn = !this.musicOn; appStore.updateSettings({ music: this.musicOn }); this.syncAudio(); target.textContent = this.musicOn ? '\u25D2' : '\u25CC'; target.setAttribute('aria-pressed', String(this.musicOn)); break
       case 'replay-celebration': this.fireworks?.replay(); break
       case 'play-again': this.room ? this.multiplayer.send({ type: 'start' }) : this.startGame(this.pendingMode); break
-      case 'results-lobby': this.renderLobby(); break
+      case 'results-lobby': {
+        const room = this.room
+        if (room && !room.localId) {
+          this.leaveRoom()
+          this.roomCode = room.code
+          this.connectToRoom(false)
+        } else this.renderLobby()
+        break
+      }
       case 'change-avatar': this.editingLobbyAvatar = Boolean(this.room); this.renderCustomize(); break
       case 'share-results': this.shareResults(); break
       case 'exit-game': this.leaveRoom(); this.renderHome(); break
@@ -289,7 +332,15 @@ export class TurfApp {
     this.roomMessage = 'Connecting to the room server...'
     this.renderLobby()
     const { nickname, avatar, settings } = appStore.get()
-    this.multiplayer.connect(create ? { type: 'create', nickname, avatar, settings } : { type: 'join', code: this.roomCode, nickname, avatar })
+    this.seatToken = undefined
+    if (create) this.multiplayer.connect({ type: 'create', nickname, avatar, settings, compact: true })
+    else this.joinSavedRoom()
+  }
+
+  private joinSavedRoom(resume = false): void {
+    const { nickname, avatar } = appStore.get()
+    try { this.seatToken ??= localStorage.getItem('turf-clash-seat:' + this.roomCode) ?? undefined } catch { /* Storage is optional. */ }
+    this.multiplayer.connect({ type: 'join', code: this.roomCode, nickname, avatar, compact: true, seatToken: this.seatToken, resume })
   }
 
   private setRoomMessage(message: string): void {
@@ -299,7 +350,11 @@ export class TurfApp {
   }
 
   private leaveRoom(): void {
+    this.multiplayer.send({ type: 'leave' })
     this.multiplayer.disconnect()
+    window.clearTimeout(this.reconnectTimer)
+    this.reconnectAttempts = 0
+    this.seatToken = undefined
     this.room = undefined
     this.connecting = false
     this.roomCode = ''
@@ -308,28 +363,34 @@ export class TurfApp {
     this.editingLobbyAvatar = false
     this.lobbySettings = undefined
     this.returnToLobbyFromSettings = false
+    this.watching = false
+    this.stopMovement()
   }
 
-  private roomDisconnected(): void {
-    const hadRoom = Boolean(this.room)
+  private roomDisconnected(code?: number): void {
+    if (this.room && code !== 4001) {
+      this.stopMovement()
+      this.reconnectAttempts += 1
+      this.setRoomMessage('Connection interrupted. Reconnecting to your room...')
+      this.reconnectTimer = window.setTimeout(() => this.joinSavedRoom(true), Math.min(750 * 2 ** (this.reconnectAttempts - 1), 8000))
+      return
+    }
+    this.showRoomFailure(code === 4001 ? 'Your seat was opened in another tab.' : 'Could not reach the room server. Check your connection and try again.')
+  }
+
+  private showRoomFailure(message: string): void {
     const code = this.roomCode
     this.leaveRoom()
     this.closeCelebration()
     this.roomCode = code
-    this.roomMessage = hadRoom
-      ? 'Connection to the room was lost. Re-enter the code to join again.'
-      : 'Could not reach the room server. Check your connection and try again.'
+    this.roomMessage = message
     this.renderLobby()
   }
 
   private receiveRoom(message: RoomMessage): void {
     if (message.type === 'error') {
-      if (this.connecting) {
-        this.connecting = false
-        this.multiplayer.disconnect()
-        this.roomMessage = message.message
-        this.renderLobby()
-      } else this.setRoomMessage(message.message)
+      if (this.connecting || this.reconnectAttempts) this.showRoomFailure(message.message)
+      else this.setRoomMessage(message.message)
       return
     }
     if (message.type === 'room') {
@@ -337,7 +398,13 @@ export class TurfApp {
       this.room = message.room
       this.roomCode = message.room.code
       this.connecting = false
-      this.roomMessage = ''
+      this.reconnectAttempts = 0
+      this.lastMatchMessageAt = performance.now()
+      this.setRoomMessage('')
+      if (message.seatToken) {
+        this.seatToken = message.seatToken
+        try { localStorage.setItem('turf-clash-seat:' + this.roomCode, message.seatToken) } catch { /* Storage is optional. */ }
+      }
       if (firstRoomUpdate || this.screen === 'lobby') {
         const local = this.localRoomPlayer()
         if (local && local.avatar.color !== appStore.get().avatar.color) appStore.updateAvatar({ color: local.avatar.color })
@@ -349,14 +416,16 @@ export class TurfApp {
     const room = this.room
     if (!room) return
     const current = message.snapshot
-    if (message.matchId !== this.matchId || message.boardVersion !== this.remoteBoardVersion) {
+    this.lastMatchMessageAt = performance.now()
+    if (current.territory !== undefined && current.trail !== undefined
+      && (message.matchId !== this.matchId || message.boardVersion !== this.remoteBoardVersion)) {
       const decodeGrid = (grid: string) => Int8Array.from(grid, cell => cell === '.' ? -1 : Number(cell))
       this.remoteTerritory = decodeGrid(current.territory)
       this.remoteTrail = decodeGrid(current.trail)
       this.remoteBoardVersion = message.boardVersion
     }
     const snapshot: GameSnapshot = { ...current, localId: room.localId, territory: this.remoteTerritory, trail: this.remoteTrail }
-    if (message.matchId !== this.matchId) {
+    if (message.matchId !== this.matchId || (this.screen === 'lobby' && snapshot.phase !== 'ended')) {
       this.matchId = message.matchId
       this.editingLobbyAvatar = false
       this.lobbySettings = undefined
@@ -394,7 +463,8 @@ export class TurfApp {
     }
     const host = this.isHost()
     const local = this.localRoomPlayer()
-    const canStart = room.players.length >= 2 && room.players.every(player => player.ready)
+    const connected = room.players.filter(player => player.connected !== false)
+    const canStart = connected.length >= 2 && connected.every(player => player.ready)
     const roomBusy = room.phase === 'countdown' || room.phase === 'live'
     const waiting = roomBusy ? 'The match is starting.' : canStart ? 'Everyone is ready.' : 'At least two players must join and be ready.'
     this.root.innerHTML = `<div class="app-shell lobby-screen">${this.topbar('lobby')}
@@ -408,7 +478,7 @@ export class TurfApp {
         <div class="player-grid">
           ${room.players.map(player => `<div class="player-card ${player.id === room.localId ? 'is-local' : ''}" style="--swatch:${COLORS[player.avatar.color]}">
             <div class="player-dot" aria-hidden="true">&#9679;</div><div><strong>${escapeHtml(player.nickname)}</strong><span>${player.id === room.hostId ? 'Host' : 'Player'}${player.id === room.localId ? ' (you)' : ''}</span></div>
-            <span class="ready-state ${player.ready ? 'ready' : ''}">${player.ready ? 'READY' : 'WAITING'}</span>
+            <span class="ready-state ${player.ready ? 'ready' : ''}">${player.connected === false ? 'RECONNECTING' : player.ready ? 'READY' : 'WAITING'}</span>
           </div>`).join('')}
           ${Array.from({ length: room.settings.maxPlayers - room.players.length }, () => '<div class="player-card empty-slot"><div class="empty-plus">+</div><span>Open slot</span></div>').join('')}
         </div>
@@ -435,11 +505,11 @@ export class TurfApp {
     this.pendingMode = mode
     this.screen = 'game'
     this.closeCelebration()
-    this.held.clear()
-    this.input = { x: 0, z: 0 }
+    this.stopMovement()
     if (shared) this.engine.beginRemoteMatch(shared)
     else this.engine.start(appStore.get().settings, appStore.get().nickname, appStore.get().avatar)
     const player = this.engine.getLocalPlayer()
+    this.watching = !player || Boolean(player.eliminated)
     const settings = this.engine.getSettings()
     const announcement = document.querySelector('#match-announcement')
     if (announcement) announcement.textContent = ''
@@ -454,8 +524,8 @@ export class TurfApp {
               </svg>
             </button>
             <div id="player-score" class="hud-player glass-card" data-score-panel>
-              <div class="hud-avatar" style="--swatch:${COLORS[player.color]}">&#10022;</div>
-              <div><span class="hud-kicker">YOU ARE</span><strong>${escapeHtml(player.nickname)}</strong><span class="hud-score"><b data-hud="territory">0.0%</b> turf &middot; <b data-hud="knockouts">0</b> KOs</span></div>
+              <div class="hud-avatar" style="--swatch:${COLORS[player?.color ?? 'yellow']}">&#10022;</div>
+              <div><span class="hud-kicker" data-hud="role">YOU ARE</span><strong>${escapeHtml(player?.nickname ?? 'Spectator')}</strong><span class="hud-score" ${player ? '' : 'hidden'}><b data-hud="territory">0.0%</b> turf &middot; <b data-hud="knockouts">0</b> KOs</span></div>
             </div>
           </div>
           <div class="match-clock"><span class="match-status" data-hud="status">READY UP</span><strong data-hud="timer">03:00</strong><span class="match-sub">TURF CLASH &middot; <b>${this.themeLabel(settings.theme).toUpperCase()}</b></span></div>
@@ -473,6 +543,7 @@ export class TurfApp {
             <div class="control-stack">
               <button class="round-icon" data-action="zoom-in" aria-label="Zoom in">+</button>
               <button class="round-icon" data-action="zoom-out" aria-label="Zoom out">&minus;</button>
+              ${appStore.get().autoRun ? '<button class="round-icon" data-action="stop-moving" aria-label="Stop auto-run" title="Stop auto-run (Space)">&#9208;</button>' : ''}
               <button class="round-icon ${this.sfxOn ? 'is-active' : ''}" data-action="toggle-sfx" aria-label="Sound effects" aria-pressed="${this.sfxOn}">&#9682;</button>
               <button class="round-icon" data-action="end-match" aria-label="End match" title="End match">&#9632;</button>
               ${this.room ? '<button class="round-icon" data-action="leave-room" aria-label="Leave room" title="Leave room">&times;</button>' : ''}
@@ -480,6 +551,7 @@ export class TurfApp {
           </div>
         </div>
         <div class="countdown-overlay" data-hud="countdown">3</div>
+        <p class="match-connection room-status" data-room-status role="status"></p>
       </div>
     </div>`
     this.bindArenaPan()
@@ -493,13 +565,21 @@ export class TurfApp {
     if (this.screen !== 'game') return
     const snapshot = this.engine.getSnapshot()
     const local = snapshot.players.find(player => player.id === snapshot.localId)
+    const watching = !local || Boolean(local.eliminated)
+    if (watching && !this.watching) {
+      this.stopMovement()
+      this.engine.showArena()
+    }
+    this.watching = watching
+    this.root.querySelectorAll<HTMLElement>('[data-joystick], [data-action="stop-moving"], [data-action="follow-player"]').forEach(control => { control.hidden = watching })
     const territory = this.engine.getLeaderboard().find(row => row.id === local?.id)
     const set = (key: string, value: string) => { const element = this.root.querySelector<HTMLElement>(`[data-hud="${key}"]`); if (element) element.textContent = value }
     set('countdown', snapshot.phase === 'countdown' ? String(snapshot.countdown) : '')
     set('territory', `${territory?.territory.toFixed(1) ?? '0.0'}%`)
     set('knockouts', String(local?.knockouts ?? 0))
     set('timer', formatTime(snapshot.timeLeft))
-    set('status', snapshot.phase === 'countdown' ? 'GET READY' : snapshot.phase === 'ended' ? 'MATCH OVER' : 'CLAIM TURF')
+    set('status', snapshot.phase === 'ended' ? 'MATCH OVER' : watching ? 'SPECTATING' : snapshot.phase === 'countdown' ? 'GET READY' : !local.alive ? 'RESPAWNING' : 'CLAIM TURF')
+    set('role', local?.eliminated ? 'ELIMINATED' : watching ? 'WATCHING MATCH' : 'YOU ARE')
     set('map-theme', this.themeLabel(snapshot.settings.theme).toUpperCase())
     const leaderboard = this.root.querySelector<HTMLElement>('[data-hud="leaderboard"]')
     if (leaderboard) leaderboard.innerHTML = this.engine.getLeaderboard().map((row, index) => `<div class="leader-row ${row.id === snapshot.localId ? 'is-you' : ''}"><span class="rank">${String(index + 1).padStart(2, '0')}</span><i style="background:${COLORS[row.color]}"></i><strong>${escapeHtml(row.nickname)}</strong><span>${row.territory.toFixed(1)}%</span></div>`).join('')
@@ -555,7 +635,7 @@ export class TurfApp {
     this.engine.resetPreview()
     this.screen = 'settings'
     const settings = this.lobbySettings ?? this.room?.settings ?? appStore.get().settings
-    this.root.innerHTML = `<div class="app-shell settings-screen">${this.topbar('settings')}<main class="settings-layout"><section class="settings-panel glass-card"><div class="step-label">CONTROL ROOM <span>PLAY YOUR WAY</span></div><h1>Dial in<br><em>the arena.</em></h1><p class="panel-subtitle">Balanced defaults are ready. Make the match yours.</p><div class="settings-grid" ${this.returnToLobbyFromSettings && !this.isHost() ? 'hidden' : ''}><label class="setting-field">Match duration<select data-field="duration"><option value="2" ${settings.duration === 2 ? 'selected' : ''}>2 minutes</option><option value="3" ${settings.duration === 3 ? 'selected' : ''}>3 minutes</option><option value="5" ${settings.duration === 5 ? 'selected' : ''}>5 minutes</option></select></label><label class="setting-field">Max players<select data-field="maxPlayers"><option value="4" ${settings.maxPlayers === 4 ? 'selected' : ''}>4 players</option><option value="6" ${settings.maxPlayers === 6 ? 'selected' : ''}>6 players</option><option value="8" ${settings.maxPlayers === 8 ? 'selected' : ''}>8 players</option></select></label><label class="setting-field">Arena theme<select data-field="theme"><option value="meadow" ${settings.theme === 'meadow' ? 'selected' : ''}>Green Meadow</option><option value="desert" ${settings.theme === 'desert' ? 'selected' : ''}>Desert Arena</option><option value="ice" ${settings.theme === 'ice' ? 'selected' : ''}>Ice Arena</option><option value="neon" ${settings.theme === 'neon' ? 'selected' : ''}>Neon Arena</option><option value="candy" ${settings.theme === 'candy' ? 'selected' : ''}>Candy World</option></select></label><label class="setting-field">Grid size<select data-field="arenaSize"><option value="40" ${settings.arenaSize === 40 ? 'selected' : ''}>40 × 40</option><option value="50" ${settings.arenaSize === 50 ? 'selected' : ''}>50 × 50</option><option value="60" ${settings.arenaSize === 60 ? 'selected' : ''}>60 × 60</option></select></label><label class="setting-field">Movement speed<input type="range" min="5" max="12" step="0.5" value="${settings.movementSpeed}" data-field="speed"><output>${settings.movementSpeed.toFixed(1)}</output></label><label class="setting-field">Respawn duration<input type="range" min="1" max="6" step="1" value="${settings.respawnDuration}" data-field="respawn"><output>${settings.respawnDuration}s</output></label></div><div class="toggle-list"><label><span><strong>Background music</strong><small>Ambient arena loop</small></span><input type="checkbox" data-field="music" ${this.musicOn ? 'checked' : ''}><i></i></label><label><span><strong>Sound effects</strong><small>Captures, KOs and buttons</small></span><input type="checkbox" data-field="sfx" ${this.sfxOn ? 'checked' : ''}><i></i></label></div><button class="button button-primary" data-action="back">Save and return <span>→</span></button></section></main></div>`
+    this.root.innerHTML = `<div class="app-shell settings-screen">${this.topbar('settings')}<main class="settings-layout"><section class="settings-panel glass-card"><div class="step-label">CONTROL ROOM <span>PLAY YOUR WAY</span></div><h1>Dial in<br><em>the arena.</em></h1><p class="panel-subtitle">Balanced defaults are ready. Make the match yours.</p><div class="settings-grid" ${this.returnToLobbyFromSettings && !this.isHost() ? 'hidden' : ''}><label class="setting-field">Match duration<select data-field="duration"><option value="2" ${settings.duration === 2 ? 'selected' : ''}>2 minutes</option><option value="3" ${settings.duration === 3 ? 'selected' : ''}>3 minutes</option><option value="5" ${settings.duration === 5 ? 'selected' : ''}>5 minutes</option></select></label><label class="setting-field">Max players<select data-field="maxPlayers"><option value="4" ${settings.maxPlayers === 4 ? 'selected' : ''}>4 players</option><option value="6" ${settings.maxPlayers === 6 ? 'selected' : ''}>6 players</option><option value="8" ${settings.maxPlayers === 8 ? 'selected' : ''}>8 players</option></select></label><label class="setting-field">Arena theme<select data-field="theme"><option value="meadow" ${settings.theme === 'meadow' ? 'selected' : ''}>Green Meadow</option><option value="desert" ${settings.theme === 'desert' ? 'selected' : ''}>Desert Arena</option><option value="ice" ${settings.theme === 'ice' ? 'selected' : ''}>Ice Arena</option><option value="neon" ${settings.theme === 'neon' ? 'selected' : ''}>Neon Arena</option><option value="candy" ${settings.theme === 'candy' ? 'selected' : ''}>Candy World</option></select></label><label class="setting-field">Grid size<select data-field="arenaSize"><option value="40" ${settings.arenaSize === 40 ? 'selected' : ''}>40 × 40</option><option value="50" ${settings.arenaSize === 50 ? 'selected' : ''}>50 × 50</option><option value="60" ${settings.arenaSize === 60 ? 'selected' : ''}>60 × 60</option></select></label><label class="setting-field">Movement speed<input type="range" min="5" max="12" step="0.5" value="${settings.movementSpeed}" data-field="speed"><output>${settings.movementSpeed.toFixed(1)}</output></label><label class="setting-field">Respawn duration<input type="range" min="1" max="6" step="1" value="${settings.respawnDuration}" data-field="respawn"><output>${settings.respawnDuration}s</output></label></div><div class="toggle-list"><label><span><strong>Auto-run</strong><small>Tap a direction to keep moving. Press Space or the pause button to stop.</small></span><input type="checkbox" data-field="auto-run" ${appStore.get().autoRun ? 'checked' : ''}><i></i></label><label><span><strong>Background music</strong><small>Ambient arena loop</small></span><input type="checkbox" data-field="music" ${this.musicOn ? 'checked' : ''}><i></i></label><label><span><strong>Sound effects</strong><small>Captures, KOs and buttons</small></span><input type="checkbox" data-field="sfx" ${this.sfxOn ? 'checked' : ''}><i></i></label></div><button class="button button-primary" data-action="back">Save and return <span>→</span></button></section></main></div>`
   }
 
   private renderHowto(): void {
@@ -573,7 +653,8 @@ export class TurfApp {
     const rematch = this.root.querySelector<HTMLButtonElement>('[data-action="play-again"]')
     if (rematch && this.room) {
       const host = this.isHost()
-      const ready = this.room.players.length >= 2 && this.room.players.every(player => player.ready)
+      const connected = this.room.players.filter(player => player.connected !== false)
+      const ready = connected.length >= 2 && connected.every(player => player.ready)
       rematch.disabled = !host || !ready
       rematch.textContent = host ? (ready ? 'Play again' : 'Waiting for players') : 'Waiting for host'
     }
@@ -609,6 +690,15 @@ export class TurfApp {
     })
   }
 
+  private stopMovement(): void {
+    this.held.clear()
+    this.input = { x: 0, z: 0 }
+    this.autoDirection = { x: 0, z: 0 }
+    const knob = this.root.querySelector<HTMLElement>('.joystick-knob')
+    if (knob) knob.style.transform = 'translate(-50%, -50%)'
+    if (this.room?.localId && this.screen === 'game') this.multiplayer.send({ type: 'input', x: 0, z: 0 })
+  }
+
   private bindJoystick(): void {
     const joystick = this.root.querySelector<HTMLElement>('[data-joystick]')
     const knob = joystick?.querySelector<HTMLElement>('.joystick-knob')
@@ -616,6 +706,7 @@ export class TurfApp {
     const reset = () => { this.input = { x: 0, z: 0 }; knob.style.transform = 'translate(-50%, -50%)' }
     const move = (event: PointerEvent) => {
       const rect = joystick.getBoundingClientRect(); const dx = event.clientX - (rect.left + rect.width / 2); const dy = event.clientY - (rect.top + rect.height / 2); const max = rect.width * 0.34; const length = Math.min(max, Math.hypot(dx, dy)); const angle = Math.atan2(dy, dx); const x = Math.cos(angle) * length; const y = Math.sin(angle) * length; knob.style.transform = `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`; this.input = { x: x / max, z: y / max }
+      if (Math.hypot(this.input.x, this.input.z) > 0.05) this.autoDirection = this.input
     }
     joystick.addEventListener('pointerdown', event => { joystick.setPointerCapture(event.pointerId); move(event) })
     joystick.addEventListener('pointermove', event => { if (joystick.hasPointerCapture(event.pointerId)) move(event) })
@@ -680,6 +771,8 @@ export class TurfApp {
     if (event.type === 'capture') this.playSound('capture')
     if (event.type === 'knockout') this.playSound(event.playerId === (this.room?.localId ?? 'local') ? 'fall' : 'bump')
     if (event.type === 'respawn' && event.playerId === (this.room?.localId ?? 'local')) this.playSound('join')
+    if ((event.type === 'respawn' || event.type === 'knockout' || event.type === 'eliminated')
+      && event.playerId === (this.room?.localId ?? 'local')) this.stopMovement()
     if (event.type === 'finished') {
       this.showResults(event.snapshot)
     }

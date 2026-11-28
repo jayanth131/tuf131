@@ -56,7 +56,8 @@ test('friend codes, ready roster, authority, shared movement and final results',
       await once(client.socket, 'open')
       return client
     }
-    const [host, guest, outsider] = await Promise.all([connect(), connect(), connect()])
+    const [host, originalGuest, outsider] = await Promise.all([connect(), connect(), connect()])
+    let guest = originalGuest
     outsider.send({ type: 'join', code: '999999', nickname: 'Outsider' })
     assert.match((await outsider.until(m => m.type === 'error')).message, /not found/i)
 
@@ -65,7 +66,8 @@ test('friend codes, ready roster, authority, shared movement and final results',
     assert.match(room.code, /^[A-Z2-9]{6}$/)
     assert.equal(room.hostId, room.localId)
     guest.send({ type: 'join', code: room.code.toLowerCase(), nickname: 'Comet', avatar: { color: 'red', hat: 'cap' } })
-    const guestRoom = (await guest.until(m => m.type === 'room')).room
+    const { room: guestRoom, seatToken } = await guest.until(m => m.type === 'room')
+    assert(seatToken)
     const joined = (await host.until(m => m.type === 'room' && m.room.players.length === 2)).room
     assert.deepEqual(joined.players, guestRoom.players)
     assert.equal(new Set(joined.players.map(p => p.avatar.color)).size, 2)
@@ -85,8 +87,12 @@ test('friend codes, ready roster, authority, shared movement and final results',
     assert.equal(starts[0].snapshot.territory.length, 1600)
     assert.equal(starts[0].snapshot.players.length, 2)
     outsider.clear()
-    outsider.send({ type: 'join', code: room.code })
-    assert.match((await outsider.until(m => m.type === 'error')).message, /in progress/i)
+    outsider.send({ type: 'join', code: room.code, nickname: 'Comet', compact: true })
+    const spectator = await outsider.until(m => m.type === 'room')
+    assert.equal(spectator.room.localId, '')
+    assert.equal(spectator.seatToken, undefined)
+    assert.equal((await outsider.until(m => m.type === 'match')).snapshot.players.length, 2)
+    await outsider.until(m => m.type === 'match' && m.snapshot.territory === undefined)
     await host.until(m => m.type === 'match' && m.snapshot.phase === 'live')
     const base = starts[0].snapshot.players[0]
     const steer = async (x, z, reached) => {
@@ -108,13 +114,27 @@ test('friend codes, ready roster, authority, shared movement and final results',
     const captured = await guest.until(m => m.type === 'match' && m.snapshot.players[0].territory > base.territory)
     assert(captured.snapshot.territory.match(/0/g).length > starts[0].snapshot.territory.match(/0/g).length)
 
+    guest.socket.terminate()
+    await host.until(m => m.type === 'room' && m.room.players.some(p => p.id === guestRoom.localId && p.connected === false))
+    guest = await connect()
+    guest.send({ type: 'join', code: room.code, seatToken, compact: true })
+    const resumed = await guest.until(m => m.type === 'room')
+    assert.equal(resumed.room.localId, guestRoom.localId)
+    assert.equal(resumed.seatToken, seatToken)
+    const resumedGame = await guest.until(m => m.type === 'match')
+    assert.equal(resumedGame.matchId, starts[0].matchId)
+    assert.equal(resumedGame.snapshot.players.find(p => p.id === guestRoom.localId).alive, true)
+    assert.equal(resumedGame.snapshot.territory.length, 1600)
+
     guest.clear()
     guest.send({ type: 'end' })
     assert.match((await guest.until(m => m.type === 'error')).message, /only the host/i)
     host.send({ type: 'end' })
     const results = await Promise.all([host, guest].map(client => client.until(m => m.type === 'match' && m.snapshot.phase === 'ended')))
-    assert.deepEqual(results[0], results[1])
-    host.socket.close()
+    assert.deepEqual(results[0].snapshot.players, results[1].snapshot.players)
+    assert.equal(results[0].snapshot.timeLeft, results[1].snapshot.timeLeft)
+    assert.equal((await outsider.until(m => m.type === 'match' && m.snapshot.phase === 'ended')).matchId, results[0].matchId)
+    host.send({ type: 'leave' })
     const promoted = await guest.until(m => m.type === 'room' && m.room.hostId === guestRoom.localId)
     assert.equal(promoted.room.players.length, 1)
   } finally {

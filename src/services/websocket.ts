@@ -5,14 +5,15 @@ export interface RoomState {
   code: string
   hostId: string
   localId: string
-  players: MatchEntrant[]
+  players: Array<MatchEntrant & { connected?: boolean }>
   settings: MatchSettings
   phase: 'lobby' | 'countdown' | 'live' | 'ended'
 }
 
 export type RoomRequest =
-  | { type: 'create'; nickname: string; avatar: AvatarConfig; settings: MatchSettings }
-  | { type: 'join'; code: string; nickname: string; avatar: AvatarConfig }
+  | { type: 'create'; nickname: string; avatar: AvatarConfig; settings: MatchSettings; compact?: boolean }
+  | { type: 'join'; code: string; nickname: string; avatar: AvatarConfig; compact?: boolean; seatToken?: string; resume?: boolean }
+  | { type: 'leave' }
   | { type: 'customize'; nickname: string; avatar: AvatarConfig }
   | { type: 'ready'; ready: boolean }
   | { type: 'settings'; settings: MatchSettings }
@@ -20,12 +21,12 @@ export type RoomRequest =
   | ({ type: 'input' } & MoveInput)
 
 export interface RoomSnapshot extends Omit<GameSnapshot, 'territory' | 'trail' | 'localId'> {
-  territory: string
-  trail: string
+  territory?: string
+  trail?: string
 }
 
 export type RoomMessage =
-  | { type: 'room'; room: RoomState }
+  | { type: 'room'; room: RoomState; seatToken?: string }
   | { type: 'match'; matchId: number; boardVersion: number; snapshot: RoomSnapshot; events: RuleEvent[] }
   | { type: 'error'; message: string }
 
@@ -41,9 +42,9 @@ export class MultiplayerClient {
   private socket?: WebSocket
   private connectTimer?: number
   private readonly message: (message: RoomMessage) => void
-  private readonly closed: () => void
+  private readonly closed: (code?: number) => void
 
-  constructor(message: (message: RoomMessage) => void, closed: () => void) {
+  constructor(message: (message: RoomMessage) => void, closed: (code?: number) => void) {
     this.message = message
     this.closed = closed
   }
@@ -54,7 +55,7 @@ export class MultiplayerClient {
       const endpoint = roomSocketUrl(import.meta.env.VITE_WS_URL, window.location.href)
       const socket = new WebSocket(endpoint)
       this.socket = socket
-      this.connectTimer = window.setTimeout(() => socket.close(), 8000)
+      this.connectTimer = window.setTimeout(() => socket.close(), 15000)
       socket.onopen = () => {
         window.clearTimeout(this.connectTimer)
         this.send(request)
@@ -65,11 +66,11 @@ export class MultiplayerClient {
         try { message = JSON.parse(String(event.data)) as RoomMessage } catch { return }
         if (message?.type === 'room' || message?.type === 'match' || message?.type === 'error') this.message(message)
       }
-      socket.onclose = () => {
+      socket.onclose = event => {
         if (this.socket !== socket) return
         window.clearTimeout(this.connectTimer)
         this.socket = undefined
-        this.closed()
+        this.closed(event.code)
       }
     } catch { this.closed() }
   }

@@ -20,13 +20,10 @@ const media = {
 const rooms = new Map()
 const sockets = new WebSocketServer({ noServer: true, maxPayload: 4096, perMessageDeflate: false })
 const tickLength = 1 / 30
+const seatGraceMs = 120_000
 
 function send(socket, message) {
-  if (socket.readyState !== WebSocket.OPEN) return
-  if (socket.bufferedAmount > 512_000) {
-    socket.terminate()
-    return
-  }
+  if (socket?.readyState !== WebSocket.OPEN) return
   socket.send(typeof message === 'string' ? message : JSON.stringify(message))
 }
 
@@ -72,61 +69,121 @@ function roomCode() {
 
 function active(room) { return room.match && room.match.phase !== 'ended' }
 
+function recipients(room) {
+  return [...Array.from(room.members.values(), member => member.socket).filter(Boolean), ...room.spectators]
+}
+
+function sendRoom(room, socket) {
+  const member = room.members.get(socket.playerId)
+  send(socket, {
+    type: 'room',
+    seatToken: member?.seatToken,
+    room: {
+      code: room.code, hostId: room.hostId, settings: room.settings,
+      players: [...room.members.values()].map(({ player, socket }) => ({ ...player, connected: Boolean(socket) })),
+      phase: room.match?.phase ?? 'lobby',
+      localId: member?.player.id ?? '',
+    },
+  })
+}
+
 function broadcastRoom(room) {
-  const shared = {
-    code: room.code, hostId: room.hostId, settings: room.settings,
-    players: [...room.members.values()].map(member => member.player),
-    phase: room.match?.phase ?? 'lobby',
-  }
-  for (const { player, socket } of room.members.values()) send(socket, { type: 'room', room: { ...shared, localId: player.id } })
+  for (const socket of recipients(room)) sendRoom(room, socket)
 }
 
 function gridString(grid) {
   return Array.from(grid, owner => owner < 0 ? '.' : String(owner)).join('')
 }
 
-function broadcastMatch(room) {
-  const { localId: _, ...snapshot } = room.match.snapshot()
+function matchPayload(room) {
+  const { localId: _, territory, trail, ...snapshot } = room.match.snapshot()
   if (room.gridVersion !== room.match.boardVersion) {
     room.gridVersion = room.match.boardVersion
-    room.territory = gridString(snapshot.territory)
-    room.trail = gridString(snapshot.trail)
+    room.territory = gridString(territory)
+    room.trail = gridString(trail)
   }
-  const message = JSON.stringify({
-    type: 'match', matchId: room.matchId, boardVersion: room.gridVersion, events: room.events.splice(0),
-    snapshot: { ...snapshot, territory: room.territory, trail: room.trail },
+  return snapshot
+}
+
+function sendMatch(room, socket, snapshot, events = []) {
+  socket.pendingEvents.push(...events)
+  if (socket.pendingEvents.length > 32) socket.pendingEvents.splice(0, socket.pendingEvents.length - 32)
+  if (snapshot.phase !== 'ended' && socket.bufferedAmount > 64_000) return
+  const includeGrid = !socket.compact || socket.sentMatchId !== room.matchId || socket.sentGridVersion !== room.gridVersion
+  send(socket, {
+    type: 'match', matchId: room.matchId, boardVersion: room.gridVersion, events: socket.pendingEvents.splice(0),
+    snapshot: { ...snapshot, ...(includeGrid && { territory: room.territory, trail: room.trail }) },
   })
-  for (const { socket } of room.members.values()) send(socket, message)
+  socket.sentMatchId = room.matchId
+  socket.sentGridVersion = room.gridVersion
+}
+
+function broadcastMatch(room) {
+  const snapshot = matchPayload(room)
+  const events = room.events.splice(0)
+  for (const socket of recipients(room)) sendMatch(room, socket, snapshot, events)
+}
+
+function attach(socket, room, member) {
+  socket.room = room
+  socket.playerId = member?.player.id
+  if (!member) {
+    room.spectators.add(socket)
+    return
+  }
+  const previous = member.socket
+  member.socket = socket
+  member.disconnectedAt = undefined
+  member.inputAt = 0
+  room.emptySince = undefined
+  if (previous) previous.close(4001, 'Seat opened in another tab')
+  if (!room.members.get(room.hostId)?.socket) room.hostId = member.player.id
 }
 
 function join(socket, message) {
   if (socket.room) return error(socket, 'You are already in a room.')
+  socket.compact = message.compact === true
   let room
   if (message.type === 'create') {
     if (rooms.size >= 128) return error(socket, 'The server is full. Try again shortly.')
-    room = { code: roomCode(), hostId: '', members: new Map(), settings: settings(message.settings), matchId: 0, gridVersion: -1 }
+    room = { code: roomCode(), hostId: '', members: new Map(), spectators: new Set(), settings: settings(message.settings), matchId: 0, gridVersion: -1 }
     rooms.set(room.code, room)
   } else {
     const code = typeof message.code === 'string' ? message.code.trim().toUpperCase() : ''
     room = rooms.get(code)
     if (!room) return error(socket, 'Room code not found.')
-    if (active(room)) return error(socket, 'This match is in progress. Join after it ends.')
+    const saved = typeof message.seatToken === 'string' && [...room.members.values()].find(member => member.seatToken === message.seatToken)
+    if (saved) {
+      attach(socket, room, saved)
+      broadcastRoom(room)
+      if (active(room) || (message.resume === true && room.match?.phase === 'ended')) sendMatch(room, socket, matchPayload(room))
+      return
+    }
+    if (active(room) || (message.resume === true && room.match?.phase === 'ended')) {
+      if (!socket.compact) return error(socket, 'Refresh the game to watch this match.')
+      if (room.spectators.size >= 16) return error(socket, 'This room has reached its spectator limit.')
+      attach(socket, room)
+      sendRoom(room, socket)
+      sendMatch(room, socket, matchPayload(room))
+      return
+    }
     if (room.members.size >= room.settings.maxPlayers) return error(socket, 'This room is full.')
   }
   const id = randomUUID()
   if (!room.hostId) room.hostId = id
   const player = { id, nickname: nickname(message.nickname), avatar: avatar(message.avatar, room, id), ready: room.hostId === id }
-  room.members.set(id, { socket, player, input: { x: 0, z: 0 }, inputAt: 0 })
-  socket.room = room
-  socket.playerId = id
+  const member = { seatToken: randomUUID(), player, input: { x: 0, z: 0 }, inputAt: 0 }
+  room.members.set(id, member)
+  attach(socket, room, member)
   broadcastRoom(room)
 }
 
 function start(room, socket) {
   if (socket.playerId !== room.hostId) return error(socket, 'Only the host can start the match.')
   if (active(room)) return
-  const members = [...room.members.values()]
+  const members = [...room.members.values()].filter(member => member.socket)
   if (members.length < 2 || members.some(member => !member.player.ready)) return error(socket, 'At least two players must be ready.')
+  for (const [id, member] of room.members) if (!member.socket) room.members.delete(id)
   room.matchId += 1
   room.gridVersion = -1
   room.events = []
@@ -140,8 +197,13 @@ function receive(socket, message) {
   if (!message || typeof message !== 'object') return
   if (message.type === 'create' || message.type === 'join') return join(socket, message)
   const room = socket.room
+  if (message.type === 'leave' && room) {
+    leave(socket, true)
+    socket.close()
+    return
+  }
   const member = room?.members.get(socket.playerId)
-  if (!member) return
+  if (member?.socket !== socket) return
   if (message.type === 'start') return start(room, socket)
   if (message.type === 'end') {
     if (socket.playerId !== room.hostId) return error(socket, 'Only the host can end the match.')
@@ -153,6 +215,8 @@ function receive(socket, message) {
   }
   if (active(room)) {
     if (message.type === 'input' && Number.isFinite(message.x) && Number.isFinite(message.z)) {
+      const player = room.match.players.find(candidate => candidate.id === socket.playerId)
+      if (!player?.alive || player.eliminated) return
       member.input = { x: limit(message.x, -1, 1, 0), z: limit(message.z, -1, 1, 0) }
       member.inputAt = performance.now()
     }
@@ -179,18 +243,25 @@ function receive(socket, message) {
   broadcastRoom(room)
 }
 
-function leave(socket) {
+function leave(socket, intentional = false) {
   const room = socket.room
   if (!room) return
-  room.members.delete(socket.playerId)
-  if (room.members.size === 0) { rooms.delete(room.code); return }
-  room.match?.removePlayer(socket.playerId)
-  if (socket.playerId === room.hostId) {
-    const first = room.members.values().next().value
-    room.hostId = first.player.id
-    first.player.ready = true
+  socket.room = undefined
+  if (room.spectators.delete(socket)) return
+  const member = room.members.get(socket.playerId)
+  if (member?.socket !== socket) return
+  member.socket = undefined
+  member.inputAt = 0
+  member.disconnectedAt = Date.now()
+  if (intentional && !active(room)) room.members.delete(socket.playerId)
+  const connected = [...room.members.values()].filter(candidate => candidate.socket)
+  if (!connected.length) room.emptySince = Date.now()
+  if (room.hostId === socket.playerId && connected.length) {
+    room.hostId = connected[0].player.id
+    connected[0].player.ready = true
   }
-  broadcastRoom(room)
+  if (!room.members.size && !room.spectators.size) rooms.delete(room.code)
+  else broadcastRoom(room)
 }
 
 function inside(base, target) {
@@ -241,11 +312,12 @@ server.on('upgrade', (request, socket, head) => {
 })
 
 sockets.on('connection', socket => {
-  socket.alive = true
+  socket.missedPongs = 0
+  socket.pendingEvents = []
   const joinedBy = setTimeout(() => { if (!socket.room) socket.close() }, 15_000)
   let windowStart = performance.now()
   let messageCount = 0
-  socket.on('pong', () => { socket.alive = true })
+  socket.on('pong', () => { socket.missedPongs = 0 })
   socket.on('message', (data, binary) => {
     const now = performance.now()
     if (now - windowStart >= 1000) { messageCount = 0; windowStart = now }
@@ -272,9 +344,15 @@ setInterval(() => {
       if (!active(room)) continue
       const inputs = new Map()
       for (const [id, member] of room.members) {
-        if (now - member.inputAt < 350) inputs.set(id, member.input)
+        if (member.socket && member.inputAt > 0 && now - member.inputAt < 1000) inputs.set(id, member.input)
       }
       room.match.update(tickLength, inputs)
+      for (const event of room.events) {
+        if (event.type === 'respawn' || event.type === 'knockout' || event.type === 'eliminated') {
+          const member = room.members.get(event.playerId)
+          if (member) member.inputAt = 0
+        }
+      }
       const ended = room.match.phase === 'ended'
       if (ended) broadcastRoom(room)
       if (ended || frame % 2 === 0) broadcastMatch(room)
@@ -283,9 +361,27 @@ setInterval(() => {
 }, 16).unref()
 
 setInterval(() => {
+  const now = Date.now()
+  for (const room of rooms.values()) {
+    if (active(room)) continue
+    if (room.emptySince && now - room.emptySince >= seatGraceMs) {
+      for (const socket of room.spectators) socket.close(1001, 'Room closed')
+      rooms.delete(room.code)
+      continue
+    }
+    if (room.match) continue
+    let changed = false
+    for (const [id, member] of room.members) {
+      if (!member.socket && now - member.disconnectedAt >= seatGraceMs) {
+        room.members.delete(id)
+        changed = true
+      }
+    }
+    if (changed) broadcastRoom(room)
+  }
   for (const socket of sockets.clients) {
-    if (!socket.alive) socket.terminate()
-    else { socket.alive = false; socket.ping() }
+    if (socket.missedPongs >= 3) socket.terminate()
+    else { socket.missedPongs += 1; socket.ping() }
   }
 }, 15_000).unref()
 

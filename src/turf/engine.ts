@@ -356,6 +356,7 @@ export class TurfEngine {
   private callbacks: EngineCallbacks
   private settings: MatchSettings
   private profile: PlayerProfile
+  private localId = 'local'
   private players: PlayerProfile[] = []
   private territory: Int8Array = createTerritory(60)
   private trail: Int8Array = new Int8Array(60 * 60).fill(-1)
@@ -438,7 +439,6 @@ export class TurfEngine {
   setPreview(config: AvatarConfig, nickname: string): void {
     this.localAvatar.setConfig(config)
     this.localAvatar.setName(nickname)
-    this.profile.nickname = nickname
     this.localAvatar.root.visible = true
   }
 
@@ -456,7 +456,7 @@ export class TurfEngine {
   applyRemoteSnapshot(snapshot: GameSnapshot, boardVersion: number): void {
     if (!this.remoteMatch) return
     this.players = snapshot.players
-    this.profile = this.players.find(player => player.id === snapshot.localId) ?? this.profile
+    this.profile = this.players.find(player => player.id === this.localId) ?? this.players[0]
     this.phase = snapshot.phase
     this.countdown = snapshot.countdown
     this.timeLeft = snapshot.timeLeft
@@ -475,7 +475,8 @@ export class TurfEngine {
     this.preview = false
     this.settings = snapshot.settings
     this.players = snapshot.players
-    this.profile = this.players.find(player => player.id === snapshot.localId)!
+    this.localId = snapshot.localId
+    this.profile = this.players.find(player => player.id === this.localId) ?? this.players[0]
     this.territory = snapshot.territory
     this.trail = snapshot.trail
     this.phase = snapshot.phase
@@ -490,15 +491,19 @@ export class TurfEngine {
     this.actors.clear()
     this.actors.add(this.localAvatar.root)
     for (const player of this.players) {
-      if (player.id === this.profile.id) continue
+      if (player.id === this.localId) continue
       const avatar = new RobotAvatar(player.nickname, player.avatar)
       this.avatars.set(player.id, avatar)
       this.actors.add(avatar.root)
     }
-    this.localAvatar.setConfig(this.profile.avatar)
-    this.localAvatar.setName(this.profile.nickname)
+    this.localAvatar.root.visible = Boolean(this.localId)
+    if (this.localId) {
+      this.localAvatar.setConfig(this.profile.avatar)
+      this.localAvatar.setName(this.profile.nickname)
+    }
     this.updateAvatars(0)
-    this.followPlayer()
+    if (this.localId && !this.profile.eliminated) this.followPlayer()
+    else this.showArena()
     this.cameraTarget.set(this.profile.x, 0, this.profile.z)
     this.camera.position.copy(this.cameraTarget).add(new THREE.Vector3(0, 14, 20.5))
     this.applyTheme(this.settings.theme)
@@ -577,8 +582,8 @@ export class TurfEngine {
   getPlayers(): PlayerProfile[] { return this.players.map(player => ({ ...player, trail: [...player.trail] })) }
   getLeaderboard(): LeaderboardRow[] { return this.players.map(player => ({ id: player.id, nickname: player.nickname, color: player.color, territory: territoryPercent(this.territory, this.players.indexOf(player)), knockouts: player.knockouts, bot: player.bot })).sort((a, b) => b.territory - a.territory || b.knockouts - a.knockouts) }
   getSettings(): MatchSettings { return { ...this.settings } }
-  getLocalPlayer(): PlayerProfile { return { ...this.profile, trail: [...this.profile.trail] } }
-  getSnapshot(): GameSnapshot { return { phase: this.phase, countdown: this.countdown, timeLeft: this.timeLeft, players: this.getPlayers(), territory: this.territory.slice(), trail: this.trail.slice(), settings: { ...this.settings }, notifications: [...this.notificationBuffer], localId: this.profile.id } }
+  getLocalPlayer(): PlayerProfile | undefined { return this.localId ? { ...this.profile, trail: [...this.profile.trail] } : undefined }
+  getSnapshot(): GameSnapshot { return { phase: this.phase, countdown: this.countdown, timeLeft: this.timeLeft, players: this.getPlayers(), territory: this.territory.slice(), trail: this.trail.slice(), settings: { ...this.settings }, notifications: [...this.notificationBuffer], localId: this.localId } }
 
   update(dt: number, input: { x: number; z: number }): void {
     if (this.champion) {
@@ -611,7 +616,7 @@ export class TurfEngine {
 
   showChampion(canvas: HTMLCanvasElement, winnerId: string): void {
     this.closeChampion()
-    const avatar = winnerId === this.profile.id ? this.localAvatar : this.avatars.get(winnerId)
+    const avatar = winnerId === this.localId ? this.localAvatar : this.avatars.get(winnerId)
     if (avatar) this.champion = new AvatarPortrait(canvas, avatar, true)
   }
 
@@ -682,7 +687,7 @@ export class TurfEngine {
 
   private updateAvatars(dt: number): void {
     for (const player of this.players) {
-      const avatar = player.id === this.profile.id ? this.localAvatar : this.avatars.get(player.id)
+      const avatar = player.id === this.localId ? this.localAvatar : this.avatars.get(player.id)
       if (!avatar) continue
       const wasVisible = avatar.root.visible
       const dx = player.x - avatar.root.position.x
@@ -691,7 +696,7 @@ export class TurfEngine {
       const moving = this.phase === 'live' && player.alive && wasVisible
         && distance > 0.001 && dt > 0 && distance <= (this.remoteMatch ? 2 : this.settings.movementSpeed * dt + 0.001)
       if (moving) avatar.faceDirection(dx, dz)
-      if (moving && player.id === this.profile.id) {
+      if (moving && player.id === this.localId) {
         this.stepDistance += this.remoteMatch ? Math.min(distance, this.settings.movementSpeed * dt) : distance
         if (this.stepDistance >= 2) {
           this.stepDistance -= 2

@@ -119,3 +119,18 @@ input[type="range"] { accent-color: var(--yellow); }
   .hud-actions .round-icon { width: 32px; height: 32px; }
   .hud-player { width: max-content; max-width: calc(100vw - 36px); }
 }
+
+.game-hud [data-joystick][hidden], .game-hud .hud-score[hidden] { display: none; }
+.match-connection:not(:empty) {
+  position: absolute;
+  top: 105px;
+  left: 50%;
+  width: max-content;
+  max-width: 85%;
+  transform: translateX(-50%);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 8px 12px;
+  text-align: center;
+}

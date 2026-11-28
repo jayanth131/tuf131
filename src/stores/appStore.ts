@@ -4,6 +4,7 @@ export interface AppState {
   nickname: string
   avatar: AvatarConfig
   settings: MatchSettings
+  autoRun: boolean
   roomCode: string
   roomCreated: boolean
 }
@@ -19,6 +20,7 @@ let state: AppState = {
   nickname: saved.nickname || 'Nova',
   avatar: { ...DEFAULT_AVATAR, ...saved.avatar },
   settings: { ...DEFAULT_SETTINGS, ...saved.settings },
+  autoRun: saved.autoRun === true,
   roomCode: '',
   roomCreated: false,
 }
@@ -28,7 +30,7 @@ export const appStore = {
   get(): AppState { return state },
   update(patch: Partial<AppState>): AppState {
     state = { ...state, ...patch }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ nickname: state.nickname, avatar: state.avatar, settings: state.settings }))
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ nickname: state.nickname, avatar: state.avatar, settings: state.settings, autoRun: state.autoRun }))
     listeners.forEach(listener => listener(state))
     return state
   },
